@@ -11,7 +11,11 @@
 // by how far past the data the target sits, and the refresh jumps Exophase
 // makes when it reveals hours of hidden growth at once (estimated from the
 // jumps the case's own history shows, with a cautious prior when it shows
-// none). The median is read at the expected last refresh before the target,
+// none). On a frozen page the refresh drop is a lower-tail risk only: the
+// median stays at the trend centre (the launch-night drop came from one
+// refresh while earned counts were still frozen; over days earned counts
+// grow too), and only the 5%/25% quantiles reach down through the refresh
+// mixture. The median is read at the expected last refresh before the target,
 // not at the target itself, because the answering read shows the page as of
 // its last refresh. Everything is deterministic: no randomness, no clock,
 // no network, standard library only.
@@ -115,8 +119,10 @@ function normCdf(x: number, mu: number, sigma: number): number {
  * Quantile of the refresh mixture: with probability (1 - p) the rate sits
  * around `centre` with spread `s0`; with probability p a refresh lands in
  * the horizon and the rate sits `drop` logit units lower. Solved by bisection
- * on the mixture CDF. With p below a half the median stays at the centre and
- * only the lower tail reaches down to cover the refresh.
+ * on the mixture CDF. Used ONLY for lower-tail quantiles (see the quantile
+ * step): the median is the centre by construction, so a near-certain refresh
+ * (p close to 1 on a long horizon) can no longer drag the median itself onto
+ * the dropped distribution.
  */
 function mixtureQuantile(level: number, centre: number, s0: number, drop: number, p: number): number {
   let lo = centre - drop - 8 * s0 - 1;
@@ -379,9 +385,24 @@ function forecastCase(c: Case): { trophies: Array<{ id: number; q: number[] }> }
     const centre = logitOf(medians[i]);
     const s = spreads[i];
     const qs = c.levels.map((lv, k) => {
-      const l = frozenPage
-        ? mixtureQuantile(lv, centre, Math.max(SPREAD_MIN, baseSigmas[i]), refreshDrops[i], pRefresh)
-        : centre + zLevels[k] * s;
+      // Frozen page: the refresh drop is a LOWER-TAIL risk, not the median.
+      // The launch-night drop (1.8 logit) came from ONE refresh over ~4.5h
+      // while earned counts were still frozen. Over a 4.5-day horizon earned
+      // counts grow as players play, so the full drop is the tail case, not
+      // the central one: with pRefresh near 1 the old mixture put the median
+      // itself on the dropped distribution and under-forecast rare trophies.
+      // So the median stays at the centre, the upper tail stays symmetric,
+      // and only the lower tail reaches down through the mixture.
+      let l: number;
+      if (!frozenPage) {
+        l = centre + zLevels[k] * s;
+      } else if (lv < 0.5) {
+        l = mixtureQuantile(lv, centre, Math.max(SPREAD_MIN, baseSigmas[i]), refreshDrops[i], pRefresh);
+      } else if (lv === 0.5) {
+        l = centre;
+      } else {
+        l = centre + zLevels[k] * s;
+      }
       const v = sigmoidPct(l);
       return round4(Math.min(100, Math.max(0.01, v)));
     });
